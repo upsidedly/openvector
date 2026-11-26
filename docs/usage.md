@@ -430,7 +430,7 @@ Every command has `--help`, and `openvector --version` prints the package
 version. The commands are:
 
 - `vectorize` converts one image.
-- `batch` converts several images with shared settings.
+- `batch` converts images and folders with shared settings.
 - `profiles` manages saved advanced settings.
 - `recent-settings` inspects or clears [recent basic settings](#recent-basic-settings).
 - `settings`, `fill`, `assign-palette`, `generate-palette`, `refine-palette`,
@@ -466,10 +466,11 @@ dimensions. Without a display, use `export-emf` with explicit
 `referenceDevice` metrics.
 
 Binary standard input needs `--filename`, because the source name affects
-processing. Existing outputs need `--force`, and the output must differ from
-the input and from any profile or recent settings file. The CLI writes the
-output only after conversion succeeds. Errors go to standard error with exit
-status 1.
+processing. Existing outputs need `--force`. The output must differ from
+the input, edit plan, and profile or recent settings files. The CLI writes
+`--output` to a temporary file beside the destination and publishes the
+completed file in one step. Forced replacements require a regular file.
+Errors go to standard error with exit status 1.
 
 Decoder coverage and known decoder gaps are recorded in the
 [image input](image-input-contract.json),
@@ -563,11 +564,23 @@ choices. No implicit GUI storage file is used. See the
 ```sh
 openvector batch first.png second.jpg --format svg --output-dir vectors
 openvector batch first.png second.png --settings batch.json --overwrite replace
+openvector batch scans/ logo.png --recursive --format svg --output-dir vectors --dry-run
 ```
 
-The export folder must already exist. Without `--output-dir`, batch uses the
-folder of the last source. The formats are SVG, EPS, PDF, AI and DXF, with AI
-as the default. As in the original, batch defaults to automatic category,
+Folder inputs need `--output-dir` set to an existing folder. They add PNG,
+JPEG, BMP, GIF, and TIFF images, with extensions matched in any case. Use
+`--recursive` to include subfolders. Discovery skips dot-prefixed files and
+folders, and symlinks. Images found in each folder are sorted by path.
+Outputs land flat in the export folder. Files sharing an output name get
+`_1`, `_2`, and so on.
+
+With `--dry-run`, the JSON report lists each source and destination as
+`would-write`, `skipped`, or `would-cancel` under the current overwrite policy.
+It leaves images, exports, and profiles untouched. A planned cancellation
+exits 130.
+
+For explicit file inputs, the default export folder is the folder of the
+last source. The formats are SVG, EPS, PDF, AI and DXF, with AI as the default. As in the original, batch defaults to automatic category,
 quality and palette detection and flattens to white. Existing outputs are
 skipped unless `--overwrite replace` is selected. With `--overwrite cancel`,
 any existing output stops the batch at preflight with exit status 130.

@@ -14,6 +14,7 @@ openvector = { path = "../openvector" }
 ctrlc = { version = "3", features = ["termination"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 serde = "1"
+tempfile = "3"
 
 [dev-dependencies]
 flate2 = "1"

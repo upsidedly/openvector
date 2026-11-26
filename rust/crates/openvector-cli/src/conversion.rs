@@ -1,7 +1,7 @@
-use crate::{Arguments,Result,read_bytes,read_json,print_json,recent_index};
-use openvector::{palette::CoreSession,image_document::{ImageDocument,TaskResult,AutomaticSelection,DocumentSnapshot},profile_palette::PaletteRuntime,saved_profiles::{SavedAdvancedProfiles,RecentBasicProfiles},settings_profile::{SettingsProfile,default_batch_profile,default_selected_profile,batch_profile_controls,apply_advanced_profile,apply_basic_profile,run_advanced_profile,run_basic_profile},batch_queue::{BatchQueue,OverwriteDecision},batch_runner::{BatchRunner,read_batch_configuration},bitmap_export::{BitmapExportInput,BitmapExportOptions,BitmapExportError,BitmapFormat}};
+use crate::{Arguments,Result,directory_batch,output_file,read_bytes,read_json,print_json,recent_index};
+use openvector::{palette::CoreSession,image_document::{ImageDocument,TaskResult,AutomaticSelection,DocumentSnapshot},profile_palette::PaletteRuntime,saved_profiles::{SavedAdvancedProfiles,RecentBasicProfiles},settings_profile::{SettingsProfile,default_batch_profile,default_selected_profile,batch_profile_controls,apply_advanced_profile,apply_basic_profile,run_advanced_profile,run_basic_profile},batch_queue::{BatchQueue,OverwriteDecision},batch_runner::{BatchRunner,read_batch_configuration,validate_batch_format},bitmap_export::{BitmapExportInput,BitmapExportOptions,BitmapExportError,BitmapFormat}};
 use serde_json::{json,Value};
-use std::{path::{Path,PathBuf,Component},io::{Write,IsTerminal},fs::OpenOptions,sync::atomic::Ordering};
+use std::{path::{Path,PathBuf,Component},io::{Write,IsTerminal},sync::atomic::Ordering};
 struct ProfileChoice{list:SavedAdvancedProfiles,filename:String,profile:SettingsProfile}
 fn profile(args:&Arguments)->Result<Option<ProfileChoice>>{
     let (name,file)=(args.get("profile"),args.get("profiles-file"));
@@ -110,7 +110,12 @@ pub fn vectorize(args:&[String])->Result<()>{
     if !scale.is_finite()||scale<=0.0{return Err("--scale must be a positive finite number.".into())}
     if let Some(output)=output{
         if input!="-"&&source_output_conflict(input,output)?{return Err("Input and output must be different files.".into())}
-        if !args.flag("force")&&Path::new(output).exists(){return Err("Output already exists. Use --force to replace it.".into())}
+        output_file::check(Path::new(output), args.flag("force")).map_err(|error| error.to_string())?;
+        if let Some(plan) = args.get("edits").filter(|plan| *plan != "-") {
+            if source_output_conflict(plan, output)? {
+                return Err("Edit plan and output must be different files.".into());
+            }
+        }
         if let Some(file)=args.get("profiles-file"){if storage_paths_collide(file,output)?{return Err("Profile storage and output must be different files.".into())}}
         if let Some(file)=args.get("recent-file"){if storage_paths_collide(file,output)?{return Err("Recent settings storage and output must be different files.".into())}}
     }
@@ -175,22 +180,30 @@ pub fn vectorize(args:&[String])->Result<()>{
         }
         crate::numeric::export(&format,&fitted,&request)?
     };
-    if let Some(output)=output{let mut options=OpenOptions::new();options.write(true);if args.flag("force"){options.create(true).truncate(true);}else{options.create_new(true);}options.open(output).and_then(|mut f|f.write_all(&bytes)).map_err(|e|e.to_string())?;}else{std::io::stdout().write_all(&bytes).map_err(|e|e.to_string())?;}Ok(())
+    if let Some(output) = output {
+        output_file::write(Path::new(output), &bytes, args.flag("force"))
+            .map_err(|error| error.to_string())?;
+    } else {
+        std::io::stdout().write_all(&bytes).map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 fn background(document:&mut ImageDocument,input:&Value)->Result<()>{
     use openvector::background_editor::{BackgroundCommand,read_background_command};
     match read_background_command(input)?{BackgroundCommand::Begin=>{document.begin_background_editing()?;},BackgroundCommand::Toggle(point)=>{document.toggle_background(point)?;},BackgroundCommand::Undo=>{document.undo_background();},BackgroundCommand::Redo=>{document.redo_background();},BackgroundCommand::Revert=>{document.revert_background();},BackgroundCommand::Finish=>{document.finish_background_editing();},BackgroundCommand::Gesture(events)=>{for event in events{document.background_gesture(&event)?;}}}Ok(())
 }
 pub fn batch(args:&[String])->Result<i32>{
-    let args=Arguments::parse(args,&["output-dir","format","settings","layout","dxf-mode","overwrite","profile","profiles-file"],&["thin-stroke","compact"])?;
+    let args=Arguments::parse(args,&["output-dir","format","settings","layout","dxf-mode","overwrite","profile","profiles-file"],&["thin-stroke","compact","recursive","dry-run"])?;
     if args.positionals.is_empty()||args.positionals.iter().any(|f|f.is_empty()||f=="-"){return Err("Choose one or more image files. Use vectorize for binary stdin, or batch --help for syntax.".into())}
     let decision=match args.get("overwrite").unwrap_or("skip"){"skip"=>OverwriteDecision::Skip,"replace"=>OverwriteDecision::Overwrite,"cancel"=>OverwriteDecision::Cancel,_=>return Err("--overwrite must be skip, replace or cancel.".into())};
     if args.get("output-dir")==Some(""){return Err("--output-dir must name an existing export folder.".into())}
     let mut settings=args.get("settings").map(read_json).transpose()?.unwrap_or(json!({}));
     let cwd=std::env::current_dir().map_err(|e|e.to_string())?;let exe=std::env::current_exe().map_err(|e|e.to_string())?;
     let mut queue=BatchQueue::new(&exe.parent().unwrap().to_string_lossy(),&cwd.to_string_lossy());
-    for duplicate in queue.add_files(&args.positionals){eprintln!("Duplicate input skipped: {duplicate}");}
+    let files = directory_batch::expand(&args.positionals, args.get("output-dir"), args.flag("recursive"))?;
+    for duplicate in queue.add_files(&files){eprintln!("Duplicate input skipped: {duplicate}");}
     if let Some(directory)=args.get("output-dir"){queue.export_directory=directory.into();}if let Some(format)=args.get("format"){queue.export_format=format.to_lowercase();}
+    validate_batch_format(&queue.export_format)?;
     let options=export_options(&args);
     if let Some(choice)=profile(&args)?{
         let (controls,_)=read_batch_configuration(&settings,&options)?;let mut base=default_batch_profile();let mut fields=base.settings.to_json();
@@ -198,7 +211,16 @@ pub fn batch(args:&[String])->Result<i32>{
         for (key,value) in [("advanced",json!(controls.advanced)),("category",json!(controls.category)),("quality",json!(controls.quality)),("paletteMode",json!(controls.palette_mode)),("backgroundMode",json!(controls.background_mode)),("palette",json!(controls.palette))]{fields.insert(key.into(),value);}
         base.settings=openvector::document_controls::read_document_settings(&Value::Object(fields)).map_err(|e|e.to_string())?;
         if controls.advanced{base.color_count=controls.color_count}else{base.basic_color_count=controls.color_count}
-        settings=batch_profile_controls(&apply_advanced_profile(Some(&base),&choice.profile,true)?);read_batch_configuration(&settings,&options)?;choice.list.write_file(&choice.filename)?;
+        settings=batch_profile_controls(&apply_advanced_profile(Some(&base),&choice.profile,true)?);
+        read_batch_configuration(&settings,&options)?;
+        if !args.flag("dry-run") { choice.list.write_file(&choice.filename)?; }
+    }
+    if args.flag("dry-run") {
+        if !Path::new(&queue.export_directory).is_dir() {
+            return Err(format!("--output-dir must be an existing folder: {}", queue.export_directory));
+        }
+        read_batch_configuration(&settings, &options)?;
+        return print_batch_plan(&mut queue, decision);
     }
     if std::io::stderr().is_terminal(){eprintln!("Processing batch...");}
     let mut runner=BatchRunner::new(queue,CoreSession::default());let cancel=runner.cancellation_handle();
@@ -206,4 +228,27 @@ pub fn batch(args:&[String])->Result<i32>{
     let result=runner.run(&settings,&options,|_|decision,None)?;
     for file in &result.files{if file.status=="failed-load"||file.status=="failed-save"{eprintln!("{}: {} {}",file.filename,if file.status=="failed-load"{"Failed To Open File."}else{"Failed To Save File."},file.error.as_deref().unwrap_or(""));}}
     print_json(&serde_json::to_value(&result).map_err(|e|e.to_string())?)?;Ok(if result.status=="cancelled"{130}else if result.failed>0{1}else{0})
+}
+
+fn print_batch_plan(queue: &mut BatchQueue, decision: OverwriteDecision) -> Result<i32> {
+    let plan = queue.prepare_for_filesystem();
+    let cancelled = !plan.overwrites.is_empty() && decision == OverwriteDecision::Cancel;
+    queue.decide_overwrite(decision);
+    let files: Vec<_> = queue.snapshot().queue.into_iter().map(|record| {
+        let status = if cancelled {
+            "would-cancel"
+        } else if record.should_process {
+            "would-write"
+        } else {
+            "skipped"
+        };
+        json!({
+            "filename": record.filename,
+            "outputFilename": record.output_filename,
+            "status": status,
+        })
+    }).collect();
+
+    print_json(&json!({ "status": if cancelled { "would-cancel" } else { "planned" }, "files": files }))?;
+    Ok(if cancelled { 130 } else { 0 })
 }

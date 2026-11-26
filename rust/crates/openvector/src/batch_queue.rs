@@ -1,6 +1,6 @@
 //! Native batch queue identity, selection and output-name planning.
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::{collections::HashSet, path::{Path, PathBuf}};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -85,6 +85,10 @@ impl BatchQueue {
     }
     pub fn remove_selected(&mut self) { self.records.retain(|r| !r.selected); }
     pub fn clear(&mut self) { self.records.clear(); }
+    pub fn prepare_for_filesystem(&mut self) -> BatchPreparation {
+        let root = PathBuf::from(&self.working_directory);
+        self.prepare(|filename| root.join(Path::new(filename)).exists())
+    }
     pub fn prepare(&mut self, mut exists: impl FnMut(&str) -> bool) -> BatchPreparation {
         let mut names = HashSet::new();
         let mut overwrites = Vec::new();

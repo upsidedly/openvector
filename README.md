@@ -109,6 +109,7 @@ node bin/openvector.mjs vectorize logo.png --output logo.svg
 node bin/openvector.mjs vectorize logo.png --output logo.pdf
 mkdir vectors
 node bin/openvector.mjs batch first.png second.jpg --format svg --output-dir vectors
+node bin/openvector.mjs batch scans/ --recursive --format svg --output-dir vectors --dry-run
 ```
 
 the output suffix selects the format. existing outputs require an explicit

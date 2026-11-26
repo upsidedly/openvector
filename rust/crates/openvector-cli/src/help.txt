@@ -1,5 +1,5 @@
 Usage: openvector vectorize <image|-> [options]
-       openvector batch <image...> [options]
+       openvector batch <files-or-directories...> [options]
        openvector settings <settings.json|->
        openvector fill <map.json|-> <seed> <replacement>
        openvector assign-palette <assignment.json|->
@@ -18,7 +18,7 @@ Usage: openvector vectorize <image|-> [options]
        openvector export-emf <document.json|->
 
 vectorize       Automatically convert a PNG, BMP, JPEG, GIF or TIFF. Use vectorize --help.
-batch           Convert multiple files with shared settings. Use batch --help.
+batch           Convert images and folders with shared settings. Use batch --help.
 profiles        Manage saved advanced settings. Use profiles --help.
 recent-settings Inspect or clear recent basic settings. Use recent-settings --help.
 settings        Print numeric engine parameters for one processing stage.

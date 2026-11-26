@@ -18,6 +18,13 @@ pub fn read_batch_configuration(settings:&Value,options:&Value)->Result<(BatchCo
     for key in object.keys(){if !["advanced","category","quality","paletteMode","colorCount","backgroundMode","palette"].contains(&key.as_str())&&!ADVANCED_BATCH_CONTROLS.contains(&key.as_str()){return Err(format!("Unknown batch setting: {key}"))}}
     Ok((read_batch_controls(settings).map_err(|e|e.to_string())?,read_export_options(options,ExportOptions::default()).map_err(|e|e.to_string())?))
 }
+pub fn validate_batch_format(format: &str) -> Result<(), String> {
+    if ["svg", "eps", "pdf", "ai", "dxf"].contains(&format) {
+        Ok(())
+    } else {
+        Err("Batch format must be svg, eps, pdf, ai or dxf.".into())
+    }
+}
 pub struct BatchRunner { pub queue:BatchQueue,document:ImageDocument,running:bool,cancel:Arc<AtomicBool>,has_document:bool }
 impl BatchRunner {
     pub fn new(queue:BatchQueue,session:CoreSession)->Self{let mut runner=Self::from_document(queue,ImageDocument::new(session));runner.has_document=false;runner}
@@ -28,7 +35,7 @@ impl BatchRunner {
     pub fn snapshot(&self)->(bool,BatchSnapshot,Option<DocumentSnapshot>){(self.running,self.queue.snapshot(),self.document().map(ImageDocument::snapshot))}
     pub fn run(&mut self,settings:&Value,export_options:&Value,mut decide:impl FnMut(&[String])->OverwriteDecision,observer:Option<&mut BatchObserver>)->Result<BatchResult,String>{
         let (controls,options)=read_batch_configuration(settings,export_options)?;
-        if !["svg","eps","pdf","ai","dxf"].contains(&self.queue.export_format.as_str()){return Err("Batch format must be svg, eps, pdf, ai or dxf.".into())}
+        validate_batch_format(&self.queue.export_format)?;
         if self.running{return Err("This batch runner is already processing a queue.".into())}
         self.running=true;
         let mut files=Vec::new();let mut sections=Vec::new();
@@ -41,7 +48,7 @@ impl BatchRunner {
         if self.queue.snapshot().queue.is_empty(){return Ok("empty")}
         if self.cancel.load(Ordering::Relaxed){return Ok("cancelled")}
         let began=Instant::now();let root=PathBuf::from(&self.queue.working_directory);
-        let plan=self.queue.prepare(|name|absolute(&root,name).exists());let before=self.queue.snapshot();
+        let plan=self.queue.prepare_for_filesystem();let before=self.queue.snapshot();
         sections.extend([format!("Starting batch processing of {} images...",before.queue.len()),format!("Start time: {}",clock()),format!("Export directory: '{}'",native_path(&before.export_directory))]);
         for record in &before.queue{sections.push(format!("Bitmap Filename: '{}'\nBitmap Directory: '{}'\nVector Filename: '{}'\nWould Overwrite: {}",basename(&record.filename),absolute(&root,&record.filename).parent().unwrap_or(Path::new("")).display(),basename(&record.output_filename),plan.overwrites.contains(&record.output_filename)));}
         let mut decision=OverwriteDecision::Skip;

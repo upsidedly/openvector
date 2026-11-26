@@ -1,5 +1,7 @@
 mod numeric;
 mod conversion;
+mod directory_batch;
+mod output_file;
 use openvector::saved_profiles::{RecentBasicProfiles, SavedAdvancedProfiles};
 use serde_json::{json, Value};
 use std::{collections::HashMap, io::{Read, Write}};
