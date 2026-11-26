@@ -99,6 +99,40 @@ fn series_fixed_uint(magnitude: &FixedUint) -> Option<FixedUint> {
     }
 }
 
+/// Approximate the fixed-point series with a certified bound on its tail.
+///
+/// The fixed-point powers and integer quotients decrease, so the alternating
+/// tail has magnitude no greater than the first omitted power. The caller
+/// accepts this approximation only when both bounds round to the same
+/// extended-precision angle register.
+fn bounded_series(magnitude: &FixedUint) -> Option<(FixedUint, FixedUint)> {
+    // Keep 12 guard bits beyond the register's 64 significant bits so the
+    // endpoints rarely straddle a rounding boundary.
+    const SERIES_BITS: u32 = 64 + 12;
+    let cutoff = magnitude.bit_len().saturating_sub(SERIES_BITS);
+    let square = magnitude.mul_shift_192(magnitude)?;
+    let mut power = *magnitude;
+    let mut sum = *magnitude;
+    let mut subtract = true;
+    let mut denominator = 3u64;
+    loop {
+        power = power.mul_shift_192(&square)?;
+        if power.bit_len() <= cutoff {
+            return Some((sum, power));
+        }
+        let term = power.div_u64(denominator)?;
+        if term.is_zero() {
+            return Some((sum, FixedUint::ZERO));
+        }
+        let complete = if subtract { sum.sub_assign(&term) } else { sum.add_assign(&term) };
+        if !complete {
+            return None;
+        }
+        subtract = !subtract;
+        denominator += 2;
+    }
+}
+
 fn series(tangent: &BigInt, working_precision: u32) -> BigInt {
     // Every power has the tangent's sign. Work on its magnitude so shifting
     // by the fixed-point precision is exactly division by 2^precision with
@@ -166,21 +200,40 @@ fn angle_step_fixed(numerator: (u64, i32), denominator: (u64, i32), transpose: b
     let significand = FixedUint::from_u64(numerator.0);
     let shifted = if shift >= 0 { significand.shl(shift as u32)? } else { significand.shr((-shift) as u32) };
     let ratio = shifted.div_u64(denominator.0)?;
-    let mut angle = if ratio > fast.quarter {
+    let reduced = ratio > fast.quarter;
+    let (tangent, negative_tangent) = if reduced {
         let (numerator, negative) = if ratio > fast.half { (ratio.sub(&fast.half)?, false) } else { (fast.half.sub(&ratio)?, true) };
-        // `(ratio - unit/2) * unit / (unit + ratio/2)`: the numerator is negative below a
-        // half turn, and the reference's division truncates toward zero, so the sign is
-        // carried beside the magnitude and the quotient's magnitude is the same either way.
-        let (reduced, _) = numerator.shl(PRECISION)?.div_rem(&fast.unit.add(&ratio.shr(1))?)?;
-        let series = SignedFixed::new(series_fixed_uint(&reduced)?, negative);
-        SignedFixed::from_uint(fast.half_angle).add(&series)?
+        // (ratio - unit/2) * unit / (unit + ratio/2) truncates toward zero,
+        // so carry the sign separately from the quotient's magnitude.
+        let (tangent, _) = numerator.shl(PRECISION)?.div_rem(&fast.unit.add(&ratio.shr(1))?)?;
+        (tangent, negative)
     } else {
-        SignedFixed::from_uint(series_fixed_uint(&ratio)?)
+        (ratio, false)
     };
-    if transpose { angle = SignedFixed::from_uint(fast.half_pi).sub(&angle)?; }
-    if negative_x { angle = SignedFixed::from_uint(fast.pi).sub(&angle)?; }
-    if negative_y { angle = angle.neg(); }
-    let register = angle.round_significand(64)?;
+    let place_angle = |value| -> Option<SignedFixed> {
+        let mut angle = SignedFixed::new(value, negative_tangent);
+        if reduced { angle = SignedFixed::from_uint(fast.half_angle).add(&angle)?; }
+        if transpose { angle = SignedFixed::from_uint(fast.half_pi).sub(&angle)?; }
+        if negative_x { angle = SignedFixed::from_uint(fast.pi).sub(&angle)?; }
+        if negative_y { angle = angle.neg(); }
+        Some(angle)
+    };
+    let (series, error) = bounded_series(&tangent)?;
+    let angle = place_angle(series)?;
+    let register = if error.is_zero() {
+        angle.round_significand(64)?
+    } else {
+        // All quadrant transforms above are signed translations, so the
+        // bound also applies to the final angle before rounding.
+        let error = SignedFixed::from_uint(error);
+        let lower = angle.sub(&error)?.round_significand(64)?;
+        let upper = angle.add(&error)?.round_significand(64)?;
+        if lower == upper {
+            lower
+        } else {
+            place_angle(series_fixed_uint(&tangent)?)?.round_significand(64)?
+        }
+    };
     // The one input that can leave the fixed domain: a previous angle whose fixed-point
     // value needs more than the type holds. The caller then runs the BigInt path.
     let previous = FixedUint::from_f64_fixed(previous_angle, PRECISION)?;
@@ -310,6 +363,12 @@ mod tests {
             let magnitude = FixedUint::from_slice(&tangent.magnitude().to_u64_digits()).unwrap();
             let sum = series_fixed_uint(&magnitude).unwrap();
             assert_eq!(num_bigint::BigUint::from_slice(&sum.to_u32_digits()), *expected.magnitude());
+            let (approximation, tail_bound) = bounded_series(&magnitude).unwrap();
+            let approximation = num_bigint::BigUint::from_slice(&approximation.to_u32_digits());
+            let tail_bound = num_bigint::BigUint::from_slice(&tail_bound.to_u32_digits());
+            let exact = expected.magnitude();
+            assert!(&approximation <= &(exact + &tail_bound));
+            assert!(exact <= &(&approximation + &tail_bound));
         }
         assert_eq!(series(&tangent, precision), expected,
             "tangent={tangent}, precision={precision}");
